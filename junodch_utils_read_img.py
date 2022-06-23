@@ -6,8 +6,6 @@ from rasterio.merge import merge as rasterMerge
 from rasterio.mask import mask as rasterMask
 from shapely.geometry import Polygon
 
-
-
 def getMosaicFromFiles(filesRaster,meta):
   mosaic, output = rasterMerge(filesRaster)
   meta.update({
@@ -18,6 +16,7 @@ def getMosaicFromFiles(filesRaster,meta):
   })
   return mosaic, meta
 
+# Get the 4 corners coordinate for a given pixel with condition
 def getCoordForPixel(mask, transform):
   dataX, dataY = np.where(mask)
   data = np.c_[dataX, dataY]
@@ -29,6 +28,7 @@ def getCoordForPixel(mask, transform):
     sampleData.append(p)
   return sampleData
 
+# From raster get the area of interest
 def getImgFromCoord(raster, areas, crop=True):
   pol = []
   for a in areas:
@@ -36,10 +36,25 @@ def getImgFromCoord(raster, areas, crop=True):
   tile, transform = rasterMask(raster, pol, crop=crop)
   return tile, transform
 
-def getTrainingAndTestPerimeter(path, threashold):
+# Get each individual image from multiple area of interest
+def getEachImgFromCoord(raster, areas, crop=True):
+  tiles = []
+  meta = []
+  for a in areas:
+    tile, transform = rasterMask(raster, [Polygon(a)], crop=crop)
+    tiles.append(tile)
+    meta.append(transform)
+  return tiles, meta
+
+# From a path of a raster, get the pixel for training and test data within the area of interest
+def getTrainingAndTestPerimeter(path, threashold, area=None):
   with rasterio.open(path) as file:
-    night = file.read(1)
-    threashold = 200
-    train = getCoordForPixel(night > threashold, file.transform)
-    test = getCoordForPixel((0 < night) & (night <= threashold), file.transform)
+    if area is not None:
+      tile, transform  = getImgFromCoord(file, [area], True)
+      tile = tile[0]
+    else:
+      tile = file.read(1)
+      transform = file.transform
+  train = getCoordForPixel(tile > threashold, transform)
+  test = getCoordForPixel((0 < tile) & (tile <= threashold), transform)
   return train, test
