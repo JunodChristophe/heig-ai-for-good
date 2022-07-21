@@ -88,7 +88,7 @@ class NightVIIRS(SatelliteData):
       'palette': ['010101','ffffff'],
     }
     self.zoom = zoom
-      
+  
   def getData(self):
     return (ee.ImageCollection(self.src))
       
