@@ -8,6 +8,7 @@ import rasterio
 from rasterio import plot as rastPlt
 from rasterio.merge import merge as rasterMerge
 from rasterio.mask import mask as rasterMask
+from rasterio.plot import reshape_as_raster, reshape_as_image
 from shapely.geometry import Polygon, box
 
 import tensorflow as tf
@@ -16,10 +17,10 @@ import keras
 def getMosaicFromFiles(filesRaster,meta):
   mosaic, output = rasterMerge(filesRaster)
   meta.update({
-      "driver": "GTiff",
-      "height": mosaic.shape[1],
-      "width": mosaic.shape[2],
-      "transform": output,
+    "driver": "GTiff",
+    "height": mosaic.shape[1],
+    "width": mosaic.shape[2],
+    "transform": output,
   })
   return mosaic, meta
 
@@ -35,29 +36,27 @@ def getImgBorder(pathImg):
   return aoi
 
 # Get the 4 corners coordinate for the given pixels
-def getCoordsForPixels(mask, transform):
-  dataX, dataY = np.where(mask)
-  data = np.c_[dataX, dataY]
-  sampleData = []
-  for x, y in data:
-    p = []
-    for offset in ['ul','ur','lr','ll']:
-      p.append(rasterio.transform.xy(transform, x, y, offset=offset))
-    sampleData.append(p)
-  return np.asarray(sampleData)
+def getCoordsForPixels(data, transform):
+  corners = np.array(['ul','ur','lr','ll'])
+  sampleData = np.empty([data.size, corners.size, 2])
+  for (x, y), _ in np.ndenumerate(data):
+    p = np.empty([4, 2])
+    for i, offset in enumerate(corners):
+      p[i, :] = rasterio.transform.xy(transform, x, y, offset=offset)
+    sampleData[x*data.shape[1] + y, :] = p
+  return sampleData
 
 # From the path to a raster, get the perimeter of each valid pixel within the area of interest
-def getTilesCoordsPerimeter(path, validThreshold=1, area=None):
+def getTilesCoordsPerimeter(path, area=None):
   with rasterio.open(path) as file:
     if area is not None: # Filter area of interest
       gridValues, transform  = getImgFromCoord(file, [area], True)
-      gridValues = gridValues[0]
+      gridValues = gridValues[0] # Only take one set of color. (Assuming the image is black and white.)
     else: # Read all
       gridValues = file.read(1)
       transform = file.transform
-  mask = (validThreshold <= gridValues)
-  data = getCoordsForPixels(mask, transform)
-  return data, gridValues[mask]
+  data = getCoordsForPixels(gridValues, transform)
+  return data, gridValues.flatten()
 
 # From raster get the area of interest
 def getImgFromCoord(raster, areas, crop=True):
@@ -66,6 +65,19 @@ def getImgFromCoord(raster, areas, crop=True):
     pol.append(Polygon(a))
   tile, transform = rasterMask(raster, pol, crop=crop)
   return tile, transform
+
+def coordsToImgsFormated(fileOpen, areasCoords, res=32):
+  tiles = np.empty([len(areasCoords), res, res, 3])
+  meta = []
+  for i, a in enumerate(areasCoords):
+    tile, transform = rasterMask(fileOpen, [Polygon(a)], crop=True)
+    if tile.shape[1] < res or tile.shape[2] < res:
+      pad1 = res - tile.shape[1] if tile.shape[1] < res else 0
+      pad2 = res - tile.shape[2] if tile.shape[2] < res else 0
+      tile = np.pad(tile, ((0,0),(0, pad1),(0, pad2)))
+    tiles[i, :, :, :] = reshape_as_image(tile[:3,:res,:res]).astype("float32") / 255.0
+    meta.append(transform)
+  return tiles, meta
 
 # Get each individual image from multiple area of interest
 def getEachImgFromCoord(raster, areas, crop=True):
@@ -76,6 +88,25 @@ def getEachImgFromCoord(raster, areas, crop=True):
     tiles.append(tile)
     meta.append(transform)
   return tiles, meta
+
+# set shape to res, move the channel dimension to the end of the shape and convert values between [0,1] if toFloat is True
+def formatData(data, res=32, toFloat=False):
+
+  # fix inconcistant shapes
+  for i, d in enumerate(data):
+    if d.shape[1] < res or d.shape[2] < res:
+      pad1 = res - d.shape[1]
+      pad2 = res - d.shape[2]
+      data[i] = np.lib.pad(d, ((0,0),(0,pad1 if pad1 > 0 else 0),(0,pad2 if pad2 > 0 else 0)), 'constant', constant_values=(0))
+    data[i]=data[i][:3,:res,:res]
+  data = np.asarray(data)
+  
+  if toFloat:
+    data = data.astype("float32") / 255.0
+  
+  # Transpose shape order to keras expected order.
+  data = data.transpose([0, 2, 3, 1])
+  return data
 
 # From the path to a raster, get the pixel for training and test data within the area of interest
 # OBSOLETE
@@ -114,25 +145,6 @@ def displayTiles(img, meta, ax=None):
 
   ax.set_xlim((xMin, xMax))
   ax.set_ylim((yMin, yMax))
-
-# set shape to res, move the channel dimension to the end of the shape and convert values between [0,1] if toFloat is True
-def formatData(data, res=32, toFloat=False):
-
-  # fix inconcistant shapes
-  for i, d in enumerate(data):
-    if d.shape[1] < res or d.shape[2] < res:
-      pad1 = res - d.shape[1]
-      pad2 = res - d.shape[2]
-      data[i] = np.lib.pad(d, ((0,0),(0,pad1 if pad1 > 0 else 0),(0,pad2 if pad2 > 0 else 0)), 'constant', constant_values=(0))
-    data[i]=data[i][:3,:res,:res]
-  data = np.asarray(data)
-  
-  if toFloat:
-    data = data.astype("float32") / 255.0
-  
-  # Transpose shape order to keras expected order.
-  data = data.transpose([0, 2, 3, 1])
-  return data
 
 # OBSOLETE
 def formatDataForAutoencoder(data, res=32, toFloat=True):
@@ -249,19 +261,20 @@ def displayImgCollection(imgs):
 # Validation
 
 # Calculate score for each img. The function is passed with calcScore.
-def scanSatellite(pathSat, coords, calcScore, batch=256):
+def scanSatellite(pathSat, coords, calcScore, batch=256, res=32):
   iSave = 0
   iNext = 0
 
   size = len(coords)
-  result = [0]*size
+  result = np.asarray([0.0]*size)
 
-  with rasterio.open(pathSat) as s:
+  with rasterio.open(pathSat) as f:
     while iNext < size:
       iNext = iSave+batch
       if iNext > size:
         iNext = size
-      data, _ = getEachImgFromCoord(s, coords[iSave:iNext], True)
+      
+      data, _ = coordsToImgsFormated(f, coords[iSave:iNext], res=res)
       score = calcScore(data)
       result[iSave:iNext] = score
       iSave = iNext
