@@ -56,7 +56,12 @@ def getTilesCoordsPerimeter(path, area=None):
       gridValues = file.read(1)
       transform = file.transform
   data = getCoordsForPixels(gridValues, transform)
-  return data, gridValues.flatten()
+  
+  # Radiance normalization
+  dataRadiance = gridValues.flatten()
+  dataRadiance = np.log((dataRadiance.astype('float')+1)) # Attempt to reduce the difference between low values and high values.
+  dataRadiance = dataRadiance / dataRadiance.max()
+  return data, dataRadiance
 
 # From raster get the area of interest
 def getImgFromCoord(raster, areas, crop=True):
@@ -190,7 +195,7 @@ def displayAutoEncoderResults(autoencoder, dataInput, showDetail=0, precision=0)
   displayImgs(decoded_imgs, scores)
 
 def displayImgEncoder(autoencoder, dataInput):
-  encoder = keras.Model(inputs=autoencoder.inputs, outputs=autoencoder.get_layer('encoder').output)
+  encoder = keras.Model(inputs=autoencoder.inputs, outputs=autoencoder.get_layer('displayable_encoder').output)
   encoded_imgs = encoder.predict(dataInput)
   displayImgCollection(encoded_imgs)
 
@@ -201,6 +206,7 @@ def displayDetailAutoencoder(autoencoder, dataInput):
     if 'Conv2D' in l.__class__.__name__:
       intermediateLayers = keras.Model(inputs=autoencoder.inputs, outputs=l.output)
       encoded_imgs = intermediateLayers.predict(dataInput)
+
       displayImgCollection(encoded_imgs)
 
 # Obsolete

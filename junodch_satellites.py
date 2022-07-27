@@ -3,12 +3,9 @@ from ipyleaflet import *
 import numpy as np
 import contextily
 
-import junodch_satellites as utilSat
 from os.path import exists
 
-from ipywidgets import IntProgress
 from IPython.display import display
-import time
 
 import ee
 from geemap import *
@@ -92,7 +89,8 @@ class Landsat8_old(SatelliteData):
             .mosaic().clip(aoi).unmask())
     
 class NightVIIRS(SatelliteData):
-  def __init__(self, minRad=1, maxRad=10, name='Night_VIIRS', zoom=9):
+  def __init__(self, minRad=1, maxRad=100, name='Night_VIIRS', zoom=8):
+    # Radiance is intentionnaly oversensitive because of the naturally low light produced in poor place.
     self.name = name
     self.src = 'NOAA/VIIRS/DNB/MONTHLY_V1/VCMSLCFG'
     self.vis = {
@@ -121,7 +119,7 @@ class popGHSL(SatelliteData):
     self.src = 'JRC/GHSL/P2016/POP_GPW_GLOBE_V1'
     self.vis = {
       "min": 0.0,
-      "max": 20.0,
+      "max": 10.0,
       "palette": ['000000', 'ffffff'],
     }
     self.zoom = zoom
