@@ -10,8 +10,8 @@ from rasterio.merge import merge as rasterMerge
 from rasterio.mask import mask as rasterMask
 from rasterio.plot import reshape_as_raster, reshape_as_image
 from shapely.geometry import Polygon, box
+from sklearn.metrics import confusion_matrix
 
-import tensorflow as tf
 import keras
 
 def getMosaicFromFiles(filesRaster,meta):
@@ -24,6 +24,7 @@ def getMosaicFromFiles(filesRaster,meta):
   })
   return mosaic, meta
 
+# Get the 4 corners coordinates of the image
 def getImgBorder(pathImg):
   # Filter the night tile not covering the day area.
   with rasterio.open(pathImg) as f:
@@ -31,8 +32,7 @@ def getImgBorder(pathImg):
   aoi = []    # Area of interest
   for v in sBox:
     aoi.append((v[0], v[1]))
-  # Remove unnecessary duplicate (The first and the last are the same point.)
-  aoi.pop()
+  aoi.pop() # Remove unnecessary duplicate (The first and the last are the same point.)
   return aoi
 
 # Get the 4 corners coordinate for the given pixels
@@ -47,7 +47,8 @@ def getCoordsForPixels(data, transform):
   return sampleData
 
 # From the path to a raster, get the perimeter of each valid pixel within the area of interest
-def getTilesCoordsPerimeter(path, area=None):
+# Also return the radiance of each pixels. radianceAmplifier reduce the gaps between values.
+def getTilesCoordsPerimeter(path, area=None, radianceAmplifier=2):
   with rasterio.open(path) as file:
     if area is not None: # Filter area of interest
       gridValues, transform  = getImgFromCoord(file, [area], True)
@@ -59,7 +60,7 @@ def getTilesCoordsPerimeter(path, area=None):
   
   # Radiance normalization
   dataRadiance = gridValues.flatten()
-  dataRadiance = np.log((dataRadiance.astype('float')+1)) # Attempt to reduce the difference between low values and high values.
+  dataRadiance = np.log((dataRadiance.astype('float')*radianceAmplifier+1)) # Attempt to reduce the difference between low values and high values.
   dataRadiance = dataRadiance / dataRadiance.max()
   return data, dataRadiance
 
@@ -71,7 +72,7 @@ def getImgFromCoord(raster, areas, crop=True):
   tile, transform = rasterMask(raster, pol, crop=crop)
   return tile, transform
 
-def coordsToImgsFormated(fileOpen, areasCoords, res=32):
+def coordsToImgsFormated(fileOpen, areasCoords, res=64):
   tiles = np.empty([len(areasCoords), res, res, 3])
   meta = []
   for i, a in enumerate(areasCoords):
@@ -95,7 +96,7 @@ def getEachImgFromCoord(raster, areas, crop=True):
   return tiles, meta
 
 # set shape to res, move the channel dimension to the end of the shape and convert values between [0,1] if toFloat is True
-def formatData(data, res=32, toFloat=False):
+def formatData(data, res=64, toFloat=False):
 
   # fix inconcistant shapes
   for i, d in enumerate(data):
@@ -113,31 +114,17 @@ def formatData(data, res=32, toFloat=False):
   data = data.transpose([0, 2, 3, 1])
   return data
 
-# From the path to a raster, get the pixel for training and test data within the area of interest
-# OBSOLETE
-def getTrainingAndTestPerimeter(path, threashold, area=None):
-  with rasterio.open(path) as file:
-    if area is not None:
-      tile, transform  = getImgFromCoord(file, [area], True)
-      tile = tile[0]
-    else:
-      tile = file.read(1)
-      transform = file.transform
-  train = getCoordsForPixels(tile > threashold, transform)
-  test = getCoordsForPixels((0 < tile) & (tile <= threashold), transform)
-  return train, test
-
-def displayTiles(img, meta, ax=None):
+def displayTiles(tile, meta, ax=None):
   if ax == None:
     fig, ax = matPlt.subplots(1,1)
-  rastPlt.show(img[0],transform=meta[0],ax=ax)
+  rastPlt.show(tile[0],transform=meta[0],ax=ax)
   xMin = ax.get_xlim()[0]
   xMax = ax.get_xlim()[1]
   yMin = ax.get_ylim()[0]
   yMax = ax.get_ylim()[1]
 
-  for i in range(1,len(img)):
-    rastPlt.show(img[i],transform=meta[i],ax=ax)
+  for i in range(1,len(tile)):
+    rastPlt.show(tile[i],transform=meta[i],ax=ax)
     newXMin = ax.get_xlim()[0]
     newXMax = ax.get_xlim()[1]
     newYMin = ax.get_ylim()[0]
@@ -151,30 +138,10 @@ def displayTiles(img, meta, ax=None):
   ax.set_xlim((xMin, xMax))
   ax.set_ylim((yMin, yMax))
 
-# OBSOLETE
-def formatDataForAutoencoder(data, res=32, toFloat=True):
-  # fix inconcistant shapes
-  for i, d in enumerate(data):
-    if d.shape[1] < res or d.shape[2] < res:
-      pad1 = res - d.shape[1]
-      pad2 = res - d.shape[2]
-      data[i] = np.lib.pad(d, ((0,0),(0,pad1 if pad1 > 0 else 0),(0,pad2 if pad2 > 0 else 0)), 'constant', constant_values=(0))
-    if d.shape[1] > res or d.shape[2] > res:
-      data[i]=data[i][:,0:res,0:res]
-
-  # to numpy
-  data = np.asarray(data)
-  if toFloat:
-    data = data.astype("float32") / 255.0
-  
-  # Transpose shape order to keras expected order.
-  data = tf.transpose(data, [0, 2, 3, 1])
-  data = tf.slice(
-    data,
-    [0, 0, 0, 0],
-    [data.shape[0],res,res,3])
-  return data
-
+# Display the original images and the result output of the autoencoder.
+# showDetail 0 : Show only output
+# showDetail 1 : Show encoded data and output
+# showDetail 2 : Show all intermediate data (If showable on a 2d plane)
 def displayAutoEncoderResults(autoencoder, dataInput, showDetail=0, precision=0):
   
   print("Original data:",dataInput.shape)
@@ -203,33 +170,16 @@ def displayImgEncoder(autoencoder, dataInput):
 def displayDetailAutoencoder(autoencoder, dataInput):
   layers = autoencoder.layers[0:len(autoencoder.layers)-1]
   for l in layers:
+    # check if this is a type of layer that can be display on a 2d plane
     if 'Conv2D' in l.__class__.__name__:
       intermediateLayers = keras.Model(inputs=autoencoder.inputs, outputs=l.output)
       encoded_imgs = intermediateLayers.predict(dataInput)
 
       displayImgCollection(encoded_imgs)
 
-# Obsolete
-def displayFormatedImgs(dataInput, createImgTitle=None):
-  # createImgTitle : Function to create a title for each individual plot from there index.
-
-  MAX_ON_ROW = 20
-  total = len(dataInput)
-  nRow = (total // MAX_ON_ROW) + 1
-  nCol = MAX_ON_ROW if total > MAX_ON_ROW else total
-  
-  matPlt.figure(figsize=(30,nRow*2))
-  for i in range(0, total):
-    ax = matPlt.subplot(nRow, nCol, 1+i)
-    if createImgTitle != None:
-      matPlt.title(createImgTitle(i))
-    matPlt.imshow(dataInput[i])
-    ax.get_xaxis().set_visible(False)
-    ax.get_yaxis().set_visible(False)
-  matPlt.show()
-
 # Display list of images
 def displayImgs(dataImg, titles=None):
+  # title : list of title to write at the top of each plot.
   MAX_ON_ROW = 20
   total = len(dataImg)
   nRow = (total // MAX_ON_ROW) + 1
@@ -245,6 +195,7 @@ def displayImgs(dataImg, titles=None):
     ax.get_yaxis().set_visible(False)
   matPlt.show()
 
+# Display images that are grouped on a grid.
 def displayImgCollection(imgs):
   grid = gridspec.GridSpec(1, imgs.shape[0])
   matPlt.figure(figsize=(30,imgs[0].T.shape[0]/8))
@@ -267,7 +218,7 @@ def displayImgCollection(imgs):
 # Validation
 
 # Calculate score for each img. The function is passed with calcScore.
-def scanSatellite(pathSat, coords, calcScore, batch=256, res=32):
+def scanSatellite(pathSat, coords, calcScore, batch=256, res=64):
   iSave = 0
   iNext = 0
 
@@ -287,19 +238,26 @@ def scanSatellite(pathSat, coords, calcScore, batch=256, res=32):
   
   return result
 
-def mapResultOnImg(pathTemplate, coordsTiles, scoreTiles, validTiles):
+# key1 : is detected
+# key2 : is in settlement data
+# key3 : has light
+defaultColorMap = {
+  (0,0,0): (0,0,0),
+  (0,0,1): (0,0,0),
+  (0,1,0): (255,0,255),
+  (0,1,1): (255,0,0),
+  (1,0,0): (0,0,255),
+  (1,0,1): (0,255,0),
+  (1,1,0): (0,255,0),
+  (1,1,1): (0,255,0),
+}
+
+# Create a new image colored from the scoreTiles and validTiles.
+def mapResultOnImg(pathTemplate, coordsTiles, scoreTiles, validTiles, lightTiles, colorMap=defaultColorMap):
   def getCenter(corners):
     lon = corners[0][0] - (corners[0][0] - corners[1][0])/2
     lat = corners[1][1] - (corners[1][1] - corners[2][1])/2
     return lon, lat
-
-  def setRGB(val, isInPop):
-    rgb = (0,0,0)
-    if val != 1: # not settlement
-      rgb = (255,0,255) if isInPop else(0,0,255)
-    else: # Settlement detected
-      rgb = (0,255,0) if isInPop else (255,0,0)
-    return rgb
   
   with rasterio.open(pathTemplate) as s:
     data = s.read()
@@ -309,7 +267,7 @@ def mapResultOnImg(pathTemplate, coordsTiles, scoreTiles, validTiles):
     for i, c in enumerate(coordsTiles):
       cx,cy = getCenter(c)
       px,py = s.index(cx,cy)
-      rgb = setRGB(scoreTiles[i], validTiles[i])
+      rgb = colorMap[(scoreTiles[i], validTiles[i], lightTiles[i])]
       
       data[0][px][py] = rgb[0]
       data[1][px][py] = rgb[1]
@@ -317,3 +275,31 @@ def mapResultOnImg(pathTemplate, coordsTiles, scoreTiles, validTiles):
       data[3][px][py] = 255
   
   return data, meta
+
+def processConfusionMatrix(detection, validation, light):
+  confusionMatrix = confusion_matrix(light, detection)
+  tp = confusionMatrix[1][1]
+  fp = confusionMatrix[0][1]
+  fn = confusionMatrix[1][0]
+  print('Total light data:',tp+fn,'Detected:',tp,'Missed:',fn)
+  print('Population with light detected:',round(tp / (tp + fn) * 100,2),"%")
+  print('')
+  
+  print('Process confustion matrix...')
+  print('total data:',len(detection))
+  confusionMatrix = confusion_matrix(validation, detection)
+  print(confusionMatrix)
+  tp = confusionMatrix[1][1]
+  fp = confusionMatrix[0][1]
+  fn = confusionMatrix[1][0]
+  print('f-score:',round(tp / (tp + (fp + fn)/2) * 100, 2),"%")
+
+def rasterToImg(image, pathTemplate):
+  img = np.copy(image)
+  img = img[0:3,:,:]
+  img = img.transpose([1, 2, 0])
+  with rasterio.open(pathTemplate) as f:
+    profile = f.profile
+  img = reshape_as_raster(img)
+  profile.update(count=3)
+  return img, profile
